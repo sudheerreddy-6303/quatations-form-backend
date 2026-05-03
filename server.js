@@ -21,8 +21,11 @@ const ALLOWED_ORIGINS = [
 ];
 app.use(cors({
   origin: (origin, cb) => {
-    // Allow requests with no origin (mobile apps, Postman) only in dev
-    if (!origin || ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
+    // Allow requests with no origin (mobile apps, Postman, server-side)
+    if (!origin) return cb(null, true);
+    // Allow all origins if wildcard is set
+    if (ALLOWED_ORIGINS.includes('*')) return cb(null, true);
+    if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
     cb(new Error(`CORS blocked: ${origin}`));
   },
   methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'],
