@@ -323,6 +323,8 @@ async function initDB() {
     await ac('payment_transactions', 'payment_details',  'TEXT');
     await ac('payment_transactions', 'received_by',      'VARCHAR(255)');
     await ac('payment_transactions', 'remarks',          'TEXT');
+    await ac('payment_transactions', 'attachment_name',  'VARCHAR(500)');
+    await ac('payment_transactions', 'attachment_data',  'LONGTEXT');
 
     console.log("DB initialized successfully.");
   } finally { try { conn.release(); } catch (_) {} }
@@ -703,12 +705,13 @@ app.post('/api/quotations/:id/transactions', requireApiKey, writeLimiter, async 
 
     const [r] = await pool.execute(
       `INSERT INTO payment_transactions
-       (quotation_id,stage_name,payment_amount,payment_date,paid_amount,paid_date,payment_type,payment_details,received_by,remarks)
-       VALUES (?,?,?,?,?,?,?,?,?,?)`,
+       (quotation_id,stage_name,payment_amount,payment_date,paid_amount,paid_date,payment_type,payment_details,received_by,remarks,attachment_name,attachment_data)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
       [req.params.id, b.stage_name||'',
        parseFloat(b.payment_amount)||0, b.payment_date||'',
        parseFloat(b.paid_amount)||0, b.paid_date||'',
-       b.payment_type||'', b.payment_details||'', b.received_by||'', b.remarks||'']
+       b.payment_type||'', b.payment_details||'', b.received_by||'', b.remarks||'',
+       b.attachment_name||null, b.attachment_data||null]
     );
     const [rows] = await pool.execute('SELECT * FROM payment_transactions WHERE id=?', [r.insertId]);
     res.status(201).json({ success: true, data: rows[0], message: 'Payment recorded.' });
@@ -732,11 +735,12 @@ app.put('/api/transactions/:txnId', requireApiKey, writeLimiter, async (req, res
 
     await pool.execute(
       `UPDATE payment_transactions SET
-       stage_name=?,payment_amount=?,payment_date=?,paid_amount=?,paid_date=?,payment_type=?,payment_details=?,received_by=?,remarks=?
+       stage_name=?,payment_amount=?,payment_date=?,paid_amount=?,paid_date=?,payment_type=?,payment_details=?,received_by=?,remarks=?,attachment_name=?,attachment_data=?
        WHERE id=?`,
       [b.stage_name||'', parseFloat(b.payment_amount)||0, b.payment_date||'',
        parseFloat(b.paid_amount)||0, b.paid_date||'',
        b.payment_type||'', b.payment_details||'', b.received_by||'', b.remarks||'',
+       b.attachment_name||null, b.attachment_data||null,
        req.params.txnId]
     );
     const [rows] = await pool.execute('SELECT * FROM payment_transactions WHERE id=?', [req.params.txnId]);
