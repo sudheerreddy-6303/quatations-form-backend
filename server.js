@@ -273,8 +273,8 @@ async function initDB() {
     try {
       const [cnt] = await conn.execute('SELECT COUNT(*) as c FROM quotations');
       if (cnt[0].c === 0) {
-        await conn.execute('ALTER TABLE quotations AUTO_INCREMENT = 1001');
-        console.log('AUTO_INCREMENT set to 1001');
+        await conn.execute('ALTER TABLE quotations AUTO_INCREMENT = 10001');
+        console.log('AUTO_INCREMENT set to 10001');
       }
     } catch(e) {}
 
@@ -325,6 +325,40 @@ async function initDB() {
     await ac('payment_transactions', 'remarks',          'TEXT');
     await ac('payment_transactions', 'attachment_name',  'VARCHAR(500)');
     await ac('payment_transactions', 'attachment_data',  'LONGTEXT');
+
+    // ── managers table ──────────────────────────────────────────
+    await conn.execute(`
+      CREATE TABLE IF NOT EXISTS managers (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        username VARCHAR(50) NOT NULL UNIQUE,
+        password VARCHAR(255) NOT NULL,
+        display  VARCHAR(255) NOT NULL,
+        role     VARCHAR(20)  NOT NULL DEFAULT 'manager',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Seed default managers if table is empty
+    const [managerCount] = await conn.execute('SELECT COUNT(*) as c FROM managers');
+    if (managerCount[0].c === 0) {
+      const defaults = [
+        ['manager', 'manager@123', 'Site Manager'],
+        ['chandu',  'chandu@123',  'Chandu'],
+        ['sony',    'sony@123',    'Sony'],
+        ['veera',   'veera@123',   'Veera'],
+        ['teja',    'teja@123',    'Teja'],
+        ['sakshi',  'sakshi@123',  'Sakshi'],
+        ['ramya',   'ramya@123',   'Ramya'],
+      ];
+      for (const [u, p, d] of defaults) {
+        await conn.execute(
+          'INSERT IGNORE INTO managers (username, password, display) VALUES (?,?,?)',
+          [u, p, d]
+        );
+      }
+      console.log('Default managers seeded into DB.');
+    }
 
     console.log("DB initialized successfully.");
   } finally { try { conn.release(); } catch (_) {} }
@@ -800,3 +834,224 @@ const PORT = process.env.PORT || 5001;
     process.exit(1);
   }
 })();
+// ════════════════════════════════════════════════════════════════
+
+// ════════════════════════════════════════════════════════════════
+//  MANAGER AUTH — FULLY DATABASE-BACKED
+// ════════════════════════════════════════════════════════════════
+
+let nodemailer;
+try { nodemailer = require('nodemailer'); } catch(_) {}
+
+// In-memory OTP store (short-lived, no need for DB): { username -> { otp, expiresAt, newPassword } }
+const otpStore = new Map();
+
+// Admin users (kept local — no DB needed for admins)
+const ADMINS = [
+  { username: 'admin',  password: 'deeraj@2024',  display: 'Administrator', role: 'admin' },
+  { username: 'deeraj', password: 'interiors123', display: 'Deeraj',        role: 'admin' },
+];
+
+function generateOTP() {
+  return Math.floor(100000 + Math.random() * 900000).toString();
+}
+
+async function trySendEmail(to, managerDisplay, managerUsername, otp) {
+  const user = (process.env.EMAIL_USER || '').trim();
+  const pass = (process.env.EMAIL_PASS || '').trim();
+  if (!nodemailer || !user || !pass ||
+      user === 'your-gmail@gmail.com' || pass === 'your-app-password') {
+    console.log(`[OTP] Email not configured — OTP for ${managerUsername}: ${otp}`);
+    return false;
+  }
+  try {
+    const transporter = nodemailer.createTransport({ service: 'gmail', auth: { user, pass } });
+    await transporter.sendMail({
+      from: `"Deeraj Interiors" <${user}>`,
+      to,
+      subject: `🔐 Password Change OTP — ${managerDisplay}`,
+      html: `<div style="font-family:Arial,sans-serif;max-width:480px;margin:auto;">
+        <div style="background:#1a0a00;padding:20px 28px;border-radius:12px 12px 0 0;">
+          <h2 style="color:#E8471C;margin:0;">Deeraj Interiors</h2>
+          <p style="color:#ccc;margin:4px 0 0;font-size:13px;">Password Change Request</p>
+        </div>
+        <div style="padding:28px;background:#fff;border-radius:0 0 12px 12px;border:1px solid #eee;">
+          <p>Manager <strong>${managerDisplay}</strong> wants to change their password.</p>
+          <div style="background:#fff4f0;border-radius:10px;padding:20px;text-align:center;margin:20px 0;">
+            <p style="color:#888;font-size:12px;margin:0 0 8px;">One-Time Password (valid 10 minutes)</p>
+            <div style="font-size:38px;font-weight:800;letter-spacing:8px;color:#E8471C;">${otp}</div>
+          </div>
+          <p style="color:#aaa;font-size:12px;">Share this with ${managerDisplay} to complete the change.</p>
+        </div>
+      </div>`,
+    });
+    return true;
+  } catch (err) {
+    console.error(`[OTP] Email failed:`, err.message);
+    return false;
+  }
+}
+
+// ── GET /api/managers ────────────────────────────────────────────
+app.get('/api/managers', requireApiKey, async (req, res) => {
+  try {
+    const [rows] = await pool.execute('SELECT username, password, display, role FROM managers ORDER BY id ASC');
+    res.json({ success: true, data: rows });
+  } catch (err) {
+    console.error('GET /managers:', err.message);
+    res.status(500).json({ success: false, message: 'Server error.' });
+  }
+});
+
+// ── POST /api/managers — add new manager ─────────────────────────
+app.post('/api/managers', requireApiKey, writeLimiter, async (req, res) => {
+  const b = sanitizeObj(req.body);
+  const username = (b.username || '').toLowerCase().trim();
+  const password = (b.password || '').trim();
+  const display  = (b.display  || '').trim();
+
+  if (!username || username.length < 2)
+    return res.status(400).json({ success: false, message: 'Username must be at least 2 characters.' });
+  if (!/^[a-z0-9_]+$/.test(username))
+    return res.status(400).json({ success: false, message: 'Username can only contain lowercase letters, numbers, underscores.' });
+  if (!password || password.length < 4)
+    return res.status(400).json({ success: false, message: 'Password must be at least 4 characters.' });
+  if (!display || display.length < 2)
+    return res.status(400).json({ success: false, message: 'Display name is required.' });
+  if (['admin','deeraj'].includes(username))
+    return res.status(409).json({ success: false, message: 'That username is reserved.' });
+
+  try {
+    await pool.execute(
+      'INSERT INTO managers (username, password, display, role) VALUES (?,?,?,?)',
+      [username, password, display, 'manager']
+    );
+    console.log(`New manager added to DB: ${username} (${display})`);
+    res.status(201).json({ success: true, message: `Manager "${display}" added successfully.` });
+  } catch (err) {
+    if (err.code === 'ER_DUP_ENTRY')
+      return res.status(409).json({ success: false, message: `Username "${username}" already exists.` });
+    console.error('POST /managers:', err.message);
+    res.status(500).json({ success: false, message: 'Server error.' });
+  }
+});
+
+// ── DELETE /api/managers/:username ───────────────────────────────
+app.delete('/api/managers/:username', requireApiKey, writeLimiter, async (req, res) => {
+  const username = (req.params.username || '').toLowerCase().trim();
+  try {
+    const [r] = await pool.execute('DELETE FROM managers WHERE username=?', [username]);
+    if (r.affectedRows === 0)
+      return res.status(404).json({ success: false, message: 'Manager not found.' });
+    otpStore.delete(username);
+    console.log(`Manager removed from DB: ${username}`);
+    res.json({ success: true, message: `Manager "${username}" removed.` });
+  } catch (err) {
+    console.error('DELETE /managers:', err.message);
+    res.status(500).json({ success: false, message: 'Server error.' });
+  }
+});
+
+// ── GET /api/admin/pending-otps ──────────────────────────────────
+app.get('/api/admin/pending-otps', requireApiKey, (req, res) => {
+  const now = Date.now();
+  const pending = [];
+  for (const [username, rec] of otpStore.entries()) {
+    if (now <= rec.expiresAt) {
+      pending.push({
+        username,
+        display: rec.display || username,
+        otp: rec.otp,
+        expiresIn: Math.round((rec.expiresAt - now) / 1000) + 's',
+      });
+    } else {
+      otpStore.delete(username);
+    }
+  }
+  res.json({ success: true, data: pending });
+});
+
+// ── POST /api/auth/request-otp ───────────────────────────────────
+app.post('/api/auth/request-otp', requireApiKey, async (req, res) => {
+  const { username, newPassword } = sanitizeObj(req.body);
+  if (!username)
+    return res.status(400).json({ success: false, message: 'Username is required.' });
+  if (!newPassword || newPassword.length < 6)
+    return res.status(400).json({ success: false, message: 'New password must be at least 6 characters.' });
+
+  try {
+    const [rows] = await pool.execute('SELECT * FROM managers WHERE username=?', [username]);
+    if (!rows.length)
+      return res.status(404).json({ success: false, message: 'Manager not found.' });
+
+    const manager = rows[0];
+    const otp = generateOTP();
+    otpStore.set(username, { otp, expiresAt: Date.now() + 10 * 60 * 1000, newPassword, display: manager.display });
+
+    const adminEmail = (process.env.ADMIN_EMAIL || '').trim();
+    const emailSent = adminEmail ? await trySendEmail(adminEmail, manager.display, username, otp) : false;
+
+    res.json({
+      success: true,
+      emailSent,
+      message: emailSent
+        ? `OTP sent to admin email. Ask admin for the code.`
+        : `OTP generated. Ask admin to check the Managers panel → "Pending OTPs".`,
+    });
+  } catch (err) {
+    console.error('POST /auth/request-otp:', err.message);
+    res.status(500).json({ success: false, message: 'Server error.' });
+  }
+});
+
+// ── POST /api/auth/verify-otp ────────────────────────────────────
+app.post('/api/auth/verify-otp', requireApiKey, async (req, res) => {
+  const { username, otp } = sanitizeObj(req.body);
+  if (!username || !otp)
+    return res.status(400).json({ success: false, message: 'Username and OTP are required.' });
+
+  const record = otpStore.get(username);
+  if (!record)
+    return res.status(400).json({ success: false, message: 'No pending OTP for this user. Please request a new one.' });
+  if (Date.now() > record.expiresAt) {
+    otpStore.delete(username);
+    return res.status(400).json({ success: false, message: 'OTP has expired. Please request a new one.' });
+  }
+  if (record.otp !== otp.trim())
+    return res.status(400).json({ success: false, message: 'Incorrect OTP. Please try again.' });
+
+  try {
+    // ✅ Save new password to DB
+    await pool.execute('UPDATE managers SET password=? WHERE username=?', [record.newPassword, username]);
+    otpStore.delete(username);
+    console.log(`Password updated in DB for manager: ${username}`);
+    res.json({ success: true, message: 'Password changed successfully! Please sign in with your new password.' });
+  } catch (err) {
+    console.error('POST /auth/verify-otp:', err.message);
+    res.status(500).json({ success: false, message: 'Server error saving new password.' });
+  }
+});
+
+// ── POST /api/auth/login ─────────────────────────────────────────
+app.post('/api/auth/login', async (req, res) => {
+  const { username, password } = sanitizeObj(req.body);
+
+  // Check admins first (local)
+  const admin = ADMINS.find(u => u.username === username && u.password === password);
+  if (admin) {
+    const { password: _p, ...safe } = admin;
+    return res.json({ success: true, user: safe });
+  }
+
+  // Check managers in DB
+  try {
+    const [rows] = await pool.execute('SELECT * FROM managers WHERE username=?', [username]);
+    if (!rows.length || rows[0].password !== password)
+      return res.status(401).json({ success: false, message: 'Invalid credentials.' });
+    const { password: _p, ...safe } = rows[0];
+    res.json({ success: true, user: safe });
+  } catch (err) {
+    console.error('POST /auth/login:', err.message);
+    res.status(500).json({ success: false, message: 'Server error.' });
+  }
+});
