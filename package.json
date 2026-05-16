@@ -16,9 +16,10 @@
     "nodemailer": "^6.9.9"
   },
   "devDependencies": {
+    "nodemailer": "^6.9.9",
     "nodemon": "^3.0.1"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": "18.20.4"
   }
 }
