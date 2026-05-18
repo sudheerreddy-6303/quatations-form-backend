@@ -585,8 +585,9 @@ async function initDB() {
       "  FOREIGN KEY (quotation_id) REFERENCES quotations(id) ON DELETE CASCADE" +
       ")"
     );
-    // migrate stage_dates column if not exists
+    // migrate stage_dates and stage_pcts columns if not exists
     try { await conn.execute("ALTER TABLE completion_status ADD COLUMN stage_dates TEXT"); } catch {}
+    try { await conn.execute("ALTER TABLE completion_status ADD COLUMN stage_pcts TEXT"); } catch {}
 
         console.log("DB initialized successfully.");
   } finally { try { conn.release(); } catch (_) {} }
@@ -1916,7 +1917,10 @@ app.get('/api/completion-status/:quotation_id', requireManagerOrAdmin, async (re
     if (row && row.stage_dates) {
       try { row.stage_dates = JSON.parse(row.stage_dates); } catch { row.stage_dates = {}; }
     }
-    res.json({ success: true, data: row || { quotation_id: req.params.quotation_id, percentage: 0, notes: '', stage_dates: {} } });
+    if (row && row.stage_pcts) {
+      try { row.stage_pcts = JSON.parse(row.stage_pcts); } catch { row.stage_pcts = {}; }
+    }
+    res.json({ success: true, data: row || { quotation_id: req.params.quotation_id, percentage: 0, notes: '', stage_dates: {}, stage_pcts: {} } });
   } catch (err) {
     res.status(500).json({ success: false, message: 'Server error.' });
   }
@@ -1924,17 +1928,18 @@ app.get('/api/completion-status/:quotation_id', requireManagerOrAdmin, async (re
 
 // POST/PUT /api/completion-status — upsert
 app.post('/api/completion-status', requireManagerOrAdmin, async (req, res) => {
-  const { quotation_id, percentage, notes, stage_dates, updated_by } = req.body;
+  const { quotation_id, percentage, notes, stage_dates, stage_pcts, updated_by } = req.body;
   if (!quotation_id) return res.status(400).json({ success: false, message: 'quotation_id required.' });
   const pct = Math.min(100, Math.max(0, parseInt(percentage) || 0));
   const stageDatesStr = stage_dates ? JSON.stringify(stage_dates) : null;
+  const stagePctsStr  = stage_pcts  ? JSON.stringify(stage_pcts)  : null;
   try {
     await pool.execute(
-      `INSERT INTO completion_status (quotation_id, percentage, notes, stage_dates, updated_by)
-       VALUES (?,?,?,?,?)
-       ON DUPLICATE KEY UPDATE percentage=?, notes=?, stage_dates=?, updated_by=?, updated_at=NOW()`,
-      [quotation_id, pct, notes || '', stageDatesStr, updated_by || '',
-       pct, notes || '', stageDatesStr, updated_by || '']
+      `INSERT INTO completion_status (quotation_id, percentage, notes, stage_dates, stage_pcts, updated_by)
+       VALUES (?,?,?,?,?,?)
+       ON DUPLICATE KEY UPDATE percentage=?, notes=?, stage_dates=?, stage_pcts=?, updated_by=?, updated_at=NOW()`,
+      [quotation_id, pct, notes || '', stageDatesStr, stagePctsStr, updated_by || '',
+       pct, notes || '', stageDatesStr, stagePctsStr, updated_by || '']
     );
     res.json({ success: true, message: 'Completion status updated.' });
   } catch (err) {
