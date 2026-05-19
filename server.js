@@ -588,6 +588,34 @@ async function initDB() {
     // migrate stage_dates and stage_pcts columns if not exists
     try { await conn.execute("ALTER TABLE completion_status ADD COLUMN stage_dates TEXT"); } catch {}
     try { await conn.execute("ALTER TABLE completion_status ADD COLUMN stage_pcts TEXT"); } catch {}
+    try { await conn.execute("ALTER TABLE quotations ADD COLUMN total_sft DECIMAL(10,2) DEFAULT 0"); } catch {}
+    try { await conn.execute("ALTER TABLE managers ADD COLUMN is_active TINYINT(1) DEFAULT 1"); } catch {}
+
+    // Recalculate total_sft for existing quotations that have rooms but sft=0
+    try {
+      const [rows] = await conn.execute("SELECT id, rooms FROM quotations WHERE (total_sft IS NULL OR total_sft = 0) AND rooms IS NOT NULL AND rooms != ''");
+      for (const row of rows) {
+        try {
+          const rooms = typeof row.rooms === 'string' ? JSON.parse(row.rooms) : row.rooms;
+          if (!rooms || typeof rooms !== 'object') continue;
+          let totalSft = 0;
+          for (const [key, room] of Object.entries(rooms)) {
+            if (key === 'accessories' || !room.items) continue;
+            for (const item of room.items) {
+              if (item.type === 'FIXED') continue;
+              const w = parseFloat(item.width) || 0;
+              const h = parseFloat(item.height) || 0;
+              const n = parseFloat(item.nos) || 0;
+              if (w && h && n) totalSft += (w * h * n) / 144;
+            }
+          }
+          if (totalSft > 0) {
+            await conn.execute("UPDATE quotations SET total_sft=? WHERE id=?", [parseFloat(totalSft.toFixed(2)), row.id]);
+          }
+        } catch {}
+      }
+      if (rows.length > 0) console.log('[Migration] Recalculated SFT for', rows.length, 'quotations');
+    } catch (e) { console.error('[Migration] SFT recalc error:', e.message); }
 
         console.log("DB initialized successfully.");
   } finally { try { conn.release(); } catch (_) {} }
@@ -659,7 +687,7 @@ app.post('/api/quotations', requireManagerOrAdmin, writeLimiter, async (req, res
         discount_percent,discount_amount,
         gst_percent,gst_amount,total_interior,total_ceiling,grand_total,
         tc_items,pay_stages,project_status,
-        project_start_date,project_end_date)
+        project_start_date,project_end_date,total_sft)
        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [
         b.customer_name,
@@ -689,7 +717,8 @@ app.post('/api/quotations', requireManagerOrAdmin, writeLimiter, async (req, res
         ss(b.tc_items), ss(b.pay_stages),
         ['Booked','Unbooked'].includes(b.project_status) ? b.project_status : 'Unbooked',
         projectStartDate,
-        projectEndDate
+        projectEndDate,
+        Number(b.total_sft) || 0
       ]
     );
 
@@ -714,10 +743,16 @@ app.get('/api/quotations', requireManagerOrAdmin, async (req, res) => {
       `SELECT q.id, q.quotation_id, q.customer_name, q.customer_phone,
               q.location, q.mobile, q.project_type, q.site_name,
               q.site_manager_name, q.site_manager_branch, q.grand_total, q.project_status, q.created_at,
+              q.project_start_date, q.project_end_date,
+              COALESCE(q.total_sft, 0) AS total_sft,
+              q.rooms,
               COALESCE(SUM(pt.paid_amount),0) AS paid_total
        FROM quotations q
        LEFT JOIN payment_transactions pt ON pt.quotation_id = q.id
-       GROUP BY q.id
+       GROUP BY q.id, q.quotation_id, q.customer_name, q.customer_phone,
+                q.location, q.mobile, q.project_type, q.site_name,
+                q.site_manager_name, q.site_manager_branch, q.grand_total, q.project_status, q.created_at,
+                q.project_start_date, q.project_end_date, q.total_sft, q.rooms
        ORDER BY q.created_at DESC`
     );
     res.json({ success: true, data: rows });
@@ -782,7 +817,7 @@ app.put('/api/quotations/:id', requireManagerOrAdmin, writeLimiter, async (req, 
         discount_percent=?,discount_amount=?,
         gst_percent=?,gst_amount=?,total_interior=?,total_ceiling=?,grand_total=?,
         tc_items=?,pay_stages=?,project_status=?,
-        project_start_date=?,project_end_date=?
+        project_start_date=?,project_end_date=?,total_sft=?
        WHERE id=?`,
       [
         b.customer_name,
@@ -813,6 +848,7 @@ app.put('/api/quotations/:id', requireManagerOrAdmin, writeLimiter, async (req, 
         ['Booked','Unbooked'].includes(b.project_status) ? b.project_status : 'Unbooked',
         projectStartDate,
         projectEndDate,
+        Number(b.total_sft) || 0,
         req.params.id
       ]
     );
@@ -1319,7 +1355,7 @@ async function trySendEmail(to, managerDisplay, managerUsername, otp) {
 // ── GET /api/managers ────────────────────────────────────────────
 app.get('/api/managers', requireAdmin, async (req, res) => {
   try {
-    const [rows] = await pool.execute('SELECT username, password, display, role FROM managers ORDER BY id ASC');
+    const [rows] = await pool.execute('SELECT username, password, display, role, COALESCE(is_active,1) AS is_active FROM managers ORDER BY id ASC');
     res.json({ success: true, data: rows });
   } catch (err) {
     console.error('GET /managers:', err.message);
@@ -1356,6 +1392,27 @@ app.post('/api/managers', requireAdmin, writeLimiter, async (req, res) => {
     if (err.code === 'ER_DUP_ENTRY')
       return res.status(409).json({ success: false, message: `Username "${username}" already exists.` });
     console.error('POST /managers:', err.message);
+    res.status(500).json({ success: false, message: 'Server error.' });
+  }
+});
+
+// ── PATCH /api/managers/:username/toggle-active ──────────────────
+app.patch('/api/managers/:username/toggle-active', requireAdmin, async (req, res) => {
+  const username = (req.params.username || '').toLowerCase().trim();
+  const { is_active } = req.body;
+  if (is_active === undefined)
+    return res.status(400).json({ success: false, message: 'is_active required.' });
+  try {
+    const [r] = await pool.execute(
+      'UPDATE managers SET is_active=? WHERE username=?',
+      [is_active ? 1 : 0, username]
+    );
+    if (!r.affectedRows)
+      return res.status(404).json({ success: false, message: 'Manager not found.' });
+    console.log(`Manager ${username} ${is_active ? 'activated' : 'deactivated'}`);
+    res.json({ success: true, message: `Manager ${is_active ? 'activated' : 'deactivated'}.` });
+  } catch (err) {
+    console.error('PATCH /toggle-active:', err.message);
     res.status(500).json({ success: false, message: 'Server error.' });
   }
 });
@@ -1494,13 +1551,18 @@ app.post('/api/auth/login', loginLimiter, async (req, res) => {
   // Check managers in DB
   try {
     const [rows] = await pool.execute(
-      'SELECT id, username, password, display, role FROM managers WHERE username=? LIMIT 1',
+      'SELECT id, username, password, display, role, COALESCE(is_active,1) AS is_active FROM managers WHERE username=? LIMIT 1',
       [username]
     );
     // Always do comparison even if not found (prevent timing-based username enumeration)
     const dbPass = rows[0]?.password || '__no_match__';
     if (!rows.length || !safeCompare(dbPass, password))
       return res.status(401).json({ success: false, message: 'Invalid credentials.' });
+
+    // Block deactivated managers
+    if (rows[0].is_active === 0 || rows[0].is_active === '0') {
+      return res.status(403).json({ success: false, message: 'Your account has been deactivated. Please contact admin.' });
+    }
 
     const { password: _p, ...safe } = rows[0];
     const token = signToken({ username: safe.username, role: safe.role || 'manager', display: safe.display });
@@ -1533,6 +1595,7 @@ app.get('/api/project-dashboard', requireAdmin, async (req, res) => {
         q.created_at,
         q.project_start_date,
         q.project_end_date,
+        q.total_sft,
         COALESCE(SUM(pt.paid_amount), 0) AS total_paid,
         (q.grand_total - COALESCE(SUM(pt.paid_amount), 0)) AS balance_due
       FROM quotations q
@@ -1540,7 +1603,7 @@ app.get('/api/project-dashboard', requireAdmin, async (req, res) => {
       WHERE q.project_status = 'Booked'
       GROUP BY q.id, q.quotation_id, q.customer_name, q.site_name, q.location,
                q.project_type, q.site_manager_name, q.grand_total,
-               q.project_status, q.created_at, q.project_start_date, q.project_end_date
+               q.project_status, q.created_at, q.project_start_date, q.project_end_date, q.total_sft
       ORDER BY q.created_at DESC
     `);
 
@@ -1593,6 +1656,7 @@ app.get('/api/project-dashboard', requireAdmin, async (req, res) => {
       total_balance:   enriched.reduce((s, p) => s + p.balance_due, 0),
       total_expenses:  enriched.reduce((s, p) => s + p.total_expenses, 0),
       profit_estimate: enriched.reduce((s, p) => s + p.profit_estimate, 0),
+      total_sft:       enriched.reduce((s, p) => s + Number(p.total_sft || 0), 0),
     };
 
     res.json({ success: true, data: enriched, summary });
