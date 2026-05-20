@@ -706,7 +706,7 @@ app.post('/api/quotations', requireManagerOrAdmin, writeLimiter, async (req, res
         b.site_manager_phone || '',
         b.site_manager_designation || '',
         b.site_manager_branch || '',
-        ss(b.rooms), ss(b.accessories), ss(b.ceiling_data),
+        ss(rawRooms), ss(rawAccessories), ss(rawCeilingData),
         Number(b.discount_percent) || 0,
         Number(b.discount_amount)  || 0,
         Number(b.gst_percent) || 0,
@@ -860,8 +860,8 @@ app.put('/api/quotations/:id', requireManagerOrAdmin, writeLimiter, async (req, 
     res.json({ success: true, message: 'Quotation updated.' });
   } catch (err) {
     try { await conn.rollback(); } catch (_) {}
-    console.error('PUT /api/quotations/:id:', err.message);
-    res.status(500).json({ success: false, message: 'Server error.' });
+    console.error('PUT /api/quotations/:id ERROR:', err.message, err.stack);
+    res.status(500).json({ success: false, message: err.message || 'Server error.' });
   } finally { try { conn.release(); } catch (_) {} }
 });
 
