@@ -635,7 +635,7 @@ async function savePaymentStages(conn, quotationId, payStages) {
       `INSERT INTO payment_stages
        (quotation_id,stage_order,stage,payment_amount,payment_date,paid_amount,paid_date,payment_type,payment_details,received_by)
        VALUES (?,?,?,?,?,?,?,?,?,?)`,
-      [quotationId, i, r.stage||'', amt, r.paymentDate||'', paid, r.paidDate||'',
+      [quotationId, i, r.stage||'', amt, r.paymentDate||null, paid, r.paidDate||null,
        r.paymentType||'', r.paymentDetails||'', r.receivedBy||'']
     );
   }
@@ -714,7 +714,7 @@ app.post('/api/quotations', requireManagerOrAdmin, writeLimiter, async (req, res
         Number(b.total_interior) || 0,
         Number(b.total_ceiling)  || 0,
         Number(b.grand_total)    || 0,
-        ss(b.tc_items), ss(b.pay_stages),
+        ss(rawTcItems), ss(rawPayStages),
         ['Booked','Unbooked'].includes(b.project_status) ? b.project_status : 'Unbooked',
         projectStartDate,
         projectEndDate,
@@ -807,6 +807,8 @@ app.put('/api/quotations/:id', requireManagerOrAdmin, writeLimiter, async (req, 
 
     await conn.beginTransaction();
 
+    // Debug log to see what's being saved
+    console.log('[PUT] id:', req.params.id, 'customer:', b.customer_name, 'total_sft:', Number(rawTotalSft)||0);
     await conn.execute(
       `UPDATE quotations SET
         customer_name=?,customer_phone=?,customer_alt_phone=?,customer_designation=?,
@@ -848,13 +850,13 @@ app.put('/api/quotations/:id', requireManagerOrAdmin, writeLimiter, async (req, 
         ['Booked','Unbooked'].includes(b.project_status) ? b.project_status : 'Unbooked',
         projectStartDate,
         projectEndDate,
-        Number(b.total_sft) || 0,
+        Number(rawTotalSft) || 0,
         req.params.id
       ]
     );
 
-    if (Array.isArray(b.pay_stages))
-      await savePaymentStages(conn, req.params.id, b.pay_stages);
+    if (Array.isArray(rawPayStages) && rawPayStages.length)
+      await savePaymentStages(conn, req.params.id, rawPayStages);
 
     await conn.commit();
     res.json({ success: true, message: 'Quotation updated.' });
