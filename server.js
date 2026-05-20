@@ -635,7 +635,7 @@ async function savePaymentStages(conn, quotationId, payStages) {
       `INSERT INTO payment_stages
        (quotation_id,stage_order,stage,payment_amount,payment_date,paid_amount,paid_date,payment_type,payment_details,received_by)
        VALUES (?,?,?,?,?,?,?,?,?,?)`,
-      [quotationId, i, r.stage||'', amt, r.paymentDate||null, paid, r.paidDate||null,
+      [quotationId, i, r.stage||'', amt, r.paymentDate||'', paid, r.paidDate||'',
        r.paymentType||'', r.paymentDetails||'', r.receivedBy||'']
     );
   }
@@ -706,7 +706,7 @@ app.post('/api/quotations', requireManagerOrAdmin, writeLimiter, async (req, res
         b.site_manager_phone || '',
         b.site_manager_designation || '',
         b.site_manager_branch || '',
-        ss(rawRooms), ss(rawAccessories), ss(rawCeilingData),
+        ss(b.rooms), ss(b.accessories), ss(b.ceiling_data),
         Number(b.discount_percent) || 0,
         Number(b.discount_amount)  || 0,
         Number(b.gst_percent) || 0,
@@ -714,7 +714,7 @@ app.post('/api/quotations', requireManagerOrAdmin, writeLimiter, async (req, res
         Number(b.total_interior) || 0,
         Number(b.total_ceiling)  || 0,
         Number(b.grand_total)    || 0,
-        ss(rawTcItems), ss(rawPayStages),
+        ss(b.tc_items), ss(b.pay_stages),
         ['Booked','Unbooked'].includes(b.project_status) ? b.project_status : 'Unbooked',
         projectStartDate,
         projectEndDate,
@@ -799,6 +799,11 @@ app.put('/api/quotations/:id', requireManagerOrAdmin, writeLimiter, async (req, 
   const { errors, data: b } = validateQuotation(req.body);
   if (errors.length) return res.status(422).json({ success: false, errors });
 
+  // Extract date fields from raw body (sanitizeObj converts null→'', so read raw)
+  const rawBody = req.body;
+  const projectStartDate = (rawBody.project_start_date && String(rawBody.project_start_date).trim()) ? String(rawBody.project_start_date).trim() : null;
+  const projectEndDate   = (rawBody.project_end_date   && String(rawBody.project_end_date).trim())   ? String(rawBody.project_end_date).trim()   : null;
+
   const conn = await pool.getConnection();
   try {
     // Verify quotation exists
@@ -807,8 +812,6 @@ app.put('/api/quotations/:id', requireManagerOrAdmin, writeLimiter, async (req, 
 
     await conn.beginTransaction();
 
-    // Debug log to see what's being saved
-    console.log('[PUT] id:', req.params.id, 'customer:', b.customer_name, 'total_sft:', Number(rawTotalSft)||0);
     await conn.execute(
       `UPDATE quotations SET
         customer_name=?,customer_phone=?,customer_alt_phone=?,customer_designation=?,
@@ -850,20 +853,20 @@ app.put('/api/quotations/:id', requireManagerOrAdmin, writeLimiter, async (req, 
         ['Booked','Unbooked'].includes(b.project_status) ? b.project_status : 'Unbooked',
         projectStartDate,
         projectEndDate,
-        Number(rawTotalSft) || 0,
+        Number(b.total_sft) || 0,
         req.params.id
       ]
     );
 
-    if (Array.isArray(rawPayStages) && rawPayStages.length)
-      await savePaymentStages(conn, req.params.id, rawPayStages);
+    if (Array.isArray(b.pay_stages))
+      await savePaymentStages(conn, req.params.id, b.pay_stages);
 
     await conn.commit();
     res.json({ success: true, message: 'Quotation updated.' });
   } catch (err) {
     try { await conn.rollback(); } catch (_) {}
-    console.error('PUT /api/quotations/:id ERROR:', err.message, err.stack);
-    res.status(500).json({ success: false, message: err.message || 'Server error.' });
+    console.error('PUT /api/quotations/:id ERROR:', err.message, '| SQL:', err.sql || 'N/A', '| Code:', err.code || 'N/A');
+    res.status(500).json({ success: false, message: 'Server error: ' + (err.sqlMessage || err.message) });
   } finally { try { conn.release(); } catch (_) {} }
 });
 
