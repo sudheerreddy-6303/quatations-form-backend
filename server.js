@@ -1995,6 +1995,18 @@ app.get('/api/completion-status/:quotation_id', requireManagerOrAdmin, async (re
   }
 });
 
+// GET /api/completion-status-bulk — fetch all at once for fast table load
+app.get('/api/completion-status-bulk', requireManagerOrAdmin, async (req, res) => {
+  try {
+    const [rows] = await pool.execute('SELECT quotation_id, percentage FROM completion_status');
+    const map = {};
+    rows.forEach(r => { map[r.quotation_id] = r.percentage ?? 0; });
+    res.json({ success: true, data: map });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Server error.' });
+  }
+});
+
 // POST/PUT /api/completion-status — upsert
 app.post('/api/completion-status', requireManagerOrAdmin, async (req, res) => {
   const { quotation_id, percentage, notes, stage_dates, stage_pcts, updated_by } = req.body;
