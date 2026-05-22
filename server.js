@@ -688,7 +688,7 @@ app.post('/api/quotations', requireManagerOrAdmin, writeLimiter, async (req, res
         gst_percent,gst_amount,total_interior,total_ceiling,grand_total,
         tc_items,pay_stages,project_status,
         project_start_date,project_end_date,total_sft)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [
         b.customer_name,
         b.customer_phone || b.mobile || '',
@@ -731,8 +731,8 @@ app.post('/api/quotations', requireManagerOrAdmin, writeLimiter, async (req, res
     res.status(201).json({ success: true, id: newId, quotation_id: String(newId), message: 'Quotation saved.' });
   } catch (err) {
     try { await conn.rollback(); } catch (_) {}
-    console.error('POST /api/quotations:', err.message);
-    res.status(500).json({ success: false, message: 'Server error. Please try again.' });
+    console.error('POST /api/quotations ERROR:', err.message, '| SQL:', err.sql || 'N/A', '| Code:', err.code || 'N/A', '| SQLMessage:', err.sqlMessage || 'N/A');
+    res.status(500).json({ success: false, message: err.sqlMessage || err.message || 'Server error. Please try again.' });
   } finally { try { conn.release(); } catch (_) {} }
 });
 
