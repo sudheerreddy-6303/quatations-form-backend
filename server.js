@@ -749,10 +749,7 @@ app.get('/api/quotations', requireManagerOrAdmin, async (req, res) => {
               COALESCE(SUM(pt.paid_amount),0) AS paid_total
        FROM quotations q
        LEFT JOIN payment_transactions pt ON pt.quotation_id = q.id
-       GROUP BY q.id, q.quotation_id, q.customer_name, q.customer_phone,
-                q.location, q.mobile, q.project_type, q.site_name,
-                q.site_manager_name, q.site_manager_branch, q.grand_total, q.project_status, q.created_at,
-                q.project_start_date, q.project_end_date, q.total_sft, q.rooms
+       GROUP BY q.id
        ORDER BY q.created_at DESC`
     );
     res.json({ success: true, data: rows });
@@ -1606,9 +1603,7 @@ app.get('/api/project-dashboard', requireAdmin, async (req, res) => {
       FROM quotations q
       LEFT JOIN payment_transactions pt ON pt.quotation_id = q.id
       WHERE q.project_status = 'Booked'
-      GROUP BY q.id, q.quotation_id, q.customer_name, q.site_name, q.location,
-               q.project_type, q.site_manager_name, q.grand_total,
-               q.project_status, q.created_at, q.project_start_date, q.project_end_date, q.total_sft
+      GROUP BY q.id
       ORDER BY q.created_at DESC
     `);
 
