@@ -746,28 +746,31 @@ app.post('/api/quotations', requireManagerOrAdmin, writeLimiter, async (req, res
 /* GET — list */
 app.get('/api/quotations', requireManagerOrAdmin, async (req, res) => {
   try {
-    // First ensure all required columns exist (safe migration)
-    const conn2 = await pool.getConnection();
-    try {
-      await conn2.execute('ALTER TABLE quotations ADD COLUMN project_start_date DATE').catch(()=>{});
-      await conn2.execute('ALTER TABLE quotations ADD COLUMN project_end_date DATE').catch(()=>{});
-      await conn2.execute('ALTER TABLE quotations ADD COLUMN total_sft DECIMAL(10,2) DEFAULT 0').catch(()=>{});
-    } finally { conn2.release(); }
-
+    // Step 1: fetch all quotation rows (SELECT * never fails due to missing columns)
     const [rows] = await pool.execute(
-      `SELECT q.id, q.quotation_id, q.customer_name, q.customer_phone,
-              q.location, q.mobile, q.project_type, q.site_name,
-              q.site_manager_name, q.site_manager_branch, q.grand_total, q.project_status, q.created_at,
-              q.project_start_date, q.project_end_date,
-              COALESCE(q.total_sft, 0) AS total_sft,
-              q.rooms,
-              COALESCE((SELECT SUM(pt2.paid_amount) FROM payment_transactions pt2 WHERE pt2.quotation_id = q.id), 0) AS paid_total
-       FROM quotations q
-       ORDER BY q.created_at DESC`
+      `SELECT * FROM quotations ORDER BY created_at DESC`
     );
-    res.json({ success: true, data: rows });
+
+    // Step 2: fetch paid totals in one query
+    const [paid] = await pool.execute(
+      `SELECT quotation_id, COALESCE(SUM(paid_amount), 0) AS paid_total
+       FROM payment_transactions GROUP BY quotation_id`
+    );
+    const paidMap = {};
+    paid.forEach(p => { paidMap[p.quotation_id] = Number(p.paid_total); });
+
+    // Step 3: merge paid_total into each row
+    const data = rows.map(q => ({
+      ...q,
+      paid_total:         paidMap[q.id] || 0,
+      total_sft:          q.total_sft          || 0,
+      project_start_date: q.project_start_date || null,
+      project_end_date:   q.project_end_date   || null,
+    }));
+
+    res.json({ success: true, data });
   } catch (err) {
-    console.error('GET /api/quotations:', err.message, '| SQL:', err.sqlMessage || 'N/A', '| Code:', err.code || 'N/A');
+    console.error('GET /api/quotations ERROR:', err.message, '| SQL:', err.sqlMessage || 'N/A', '| Code:', err.code || 'N/A');
     res.status(500).json({ success: false, message: err.sqlMessage || err.message || 'Server error.' });
   }
 });
