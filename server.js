@@ -590,6 +590,10 @@ async function initDB() {
     try { await conn.execute("ALTER TABLE completion_status ADD COLUMN stage_pcts TEXT"); } catch {}
     try { await conn.execute("ALTER TABLE quotations ADD COLUMN total_sft DECIMAL(10,2) DEFAULT 0"); } catch {}
     try { await conn.execute("ALTER TABLE managers ADD COLUMN is_active TINYINT(1) DEFAULT 1"); } catch {}
+    try { await conn.execute("ALTER TABLE quotations ADD COLUMN project_start_date DATE"); } catch {}
+    try { await conn.execute("ALTER TABLE quotations ADD COLUMN project_end_date DATE"); } catch {}
+    try { await conn.execute("ALTER TABLE quotations ADD COLUMN customer_alt_phone VARCHAR(20)"); } catch {}
+    try { await conn.execute("ALTER TABLE quotations ADD COLUMN customer_designation VARCHAR(255)"); } catch {}
 
     // Recalculate total_sft for existing quotations that have rooms but sft=0
     try {
@@ -752,8 +756,8 @@ app.get('/api/quotations', requireManagerOrAdmin, async (req, res) => {
     );
     res.json({ success: true, data: rows });
   } catch (err) {
-    console.error('GET /api/quotations:', err.message);
-    res.status(500).json({ success: false, message: 'Server error.' });
+    console.error('GET /api/quotations:', err.message, '| SQL:', err.sqlMessage || 'N/A', '| Code:', err.code || 'N/A');
+    res.status(500).json({ success: false, message: err.sqlMessage || err.message || 'Server error.' });
   }
 });
 
