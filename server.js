@@ -746,10 +746,8 @@ app.get('/api/quotations', requireManagerOrAdmin, async (req, res) => {
               q.project_start_date, q.project_end_date,
               COALESCE(q.total_sft, 0) AS total_sft,
               q.rooms,
-              COALESCE(SUM(pt.paid_amount),0) AS paid_total
+              COALESCE((SELECT SUM(pt2.paid_amount) FROM payment_transactions pt2 WHERE pt2.quotation_id = q.id), 0) AS paid_total
        FROM quotations q
-       LEFT JOIN payment_transactions pt ON pt.quotation_id = q.id
-       GROUP BY q.id
        ORDER BY q.created_at DESC`
     );
     res.json({ success: true, data: rows });
@@ -1592,18 +1590,17 @@ app.get('/api/project-dashboard', requireAdmin, async (req, res) => {
         q.location,
         q.project_type,
         q.site_manager_name,
+        q.site_manager_branch,
         q.grand_total,
         q.project_status,
         q.created_at,
         q.project_start_date,
         q.project_end_date,
         q.total_sft,
-        COALESCE(SUM(pt.paid_amount), 0) AS total_paid,
-        (q.grand_total - COALESCE(SUM(pt.paid_amount), 0)) AS balance_due
+        COALESCE((SELECT SUM(pt2.paid_amount) FROM payment_transactions pt2 WHERE pt2.quotation_id = q.id), 0) AS total_paid,
+        (q.grand_total - COALESCE((SELECT SUM(pt2.paid_amount) FROM payment_transactions pt2 WHERE pt2.quotation_id = q.id), 0)) AS balance_due
       FROM quotations q
-      LEFT JOIN payment_transactions pt ON pt.quotation_id = q.id
       WHERE q.project_status = 'Booked'
-      GROUP BY q.id
       ORDER BY q.created_at DESC
     `);
 
