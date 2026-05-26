@@ -746,9 +746,9 @@ app.post('/api/quotations', requireManagerOrAdmin, writeLimiter, async (req, res
 /* GET — list */
 app.get('/api/quotations', requireManagerOrAdmin, async (req, res) => {
   try {
-    // Step 1: fetch all quotation rows (SELECT * never fails due to missing columns)
+    // Step 1: fetch all quotation rows — no ORDER BY to avoid sort buffer limits
     const [rows] = await pool.execute(
-      `SELECT * FROM quotations ORDER BY created_at DESC`
+      `SELECT * FROM quotations`
     );
 
     // Step 2: fetch paid totals in one query
@@ -759,14 +759,16 @@ app.get('/api/quotations', requireManagerOrAdmin, async (req, res) => {
     const paidMap = {};
     paid.forEach(p => { paidMap[p.quotation_id] = Number(p.paid_total); });
 
-    // Step 3: merge paid_total into each row
-    const data = rows.map(q => ({
-      ...q,
-      paid_total:         paidMap[q.id] || 0,
-      total_sft:          q.total_sft          || 0,
-      project_start_date: q.project_start_date || null,
-      project_end_date:   q.project_end_date   || null,
-    }));
+    // Step 3: merge + sort by id descending in JS (avoids DB sort buffer issue)
+    const data = rows
+      .map(q => ({
+        ...q,
+        paid_total:         paidMap[q.id] || 0,
+        total_sft:          q.total_sft          || 0,
+        project_start_date: q.project_start_date || null,
+        project_end_date:   q.project_end_date   || null,
+      }))
+      .sort((a, b) => b.id - a.id); // newest first, no DB memory needed
 
     res.json({ success: true, data });
   } catch (err) {
