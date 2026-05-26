@@ -588,8 +588,11 @@ async function initDB() {
     // migrate stage_dates and stage_pcts columns if not exists
     try { await conn.execute("ALTER TABLE completion_status ADD COLUMN stage_dates TEXT"); } catch {}
     try { await conn.execute("ALTER TABLE completion_status ADD COLUMN stage_pcts TEXT"); } catch {}
-    try { await conn.execute("ALTER TABLE quotations ADD COLUMN total_sft DECIMAL(10,2) DEFAULT 0"); } catch {}
+    try { await conn.execute("ALTER TABLE quotations ADD COLUMN total_sft DECIMAL(10,2) DEFAULT 0"); console.log('[Migration] total_sft column ready'); } catch {}
     try { await conn.execute("ALTER TABLE managers ADD COLUMN is_active TINYINT(1) DEFAULT 1"); } catch {}
+    // Ensure columns used in GET /api/quotations SELECT exist
+    try { await conn.execute("ALTER TABLE quotations ADD COLUMN project_start_date DATE"); console.log('[Migration] project_start_date added'); } catch(e) { if (!e.message.includes('Duplicate')) console.log('[Migration] project_start_date exists'); }
+    try { await conn.execute("ALTER TABLE quotations ADD COLUMN project_end_date DATE"); console.log('[Migration] project_end_date added'); } catch(e) { if (!e.message.includes('Duplicate')) console.log('[Migration] project_end_date exists'); }
     try { await conn.execute("ALTER TABLE quotations ADD COLUMN project_start_date DATE"); } catch {}
     try { await conn.execute("ALTER TABLE quotations ADD COLUMN project_end_date DATE"); } catch {}
     try { await conn.execute("ALTER TABLE quotations ADD COLUMN customer_alt_phone VARCHAR(20)"); } catch {}
@@ -743,6 +746,14 @@ app.post('/api/quotations', requireManagerOrAdmin, writeLimiter, async (req, res
 /* GET — list */
 app.get('/api/quotations', requireManagerOrAdmin, async (req, res) => {
   try {
+    // First ensure all required columns exist (safe migration)
+    const conn2 = await pool.getConnection();
+    try {
+      await conn2.execute('ALTER TABLE quotations ADD COLUMN project_start_date DATE').catch(()=>{});
+      await conn2.execute('ALTER TABLE quotations ADD COLUMN project_end_date DATE').catch(()=>{});
+      await conn2.execute('ALTER TABLE quotations ADD COLUMN total_sft DECIMAL(10,2) DEFAULT 0').catch(()=>{});
+    } finally { conn2.release(); }
+
     const [rows] = await pool.execute(
       `SELECT q.id, q.quotation_id, q.customer_name, q.customer_phone,
               q.location, q.mobile, q.project_type, q.site_name,
