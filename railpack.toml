@@ -1,0 +1,7 @@
+[build]
+cmd = "npm install"
+
+[start]
+cmd = "npm start"
+workdir = "/app"
+
