@@ -300,6 +300,7 @@ async function initDB() {
         total_ceiling DECIMAL(12,2) DEFAULT 0,
         grand_total DECIMAL(12,2) DEFAULT 0,
         tc_items JSON,
+        note_items JSON,
         pay_stages JSON,
         project_status VARCHAR(20) DEFAULT 'Unbooked',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -392,6 +393,7 @@ async function initDB() {
     await ac('quotations', 'gst_percent',             'DECIMAL(5,2) DEFAULT 0');
     await ac('quotations', 'gst_amount',              'DECIMAL(12,2) DEFAULT 0');
     await ac('quotations', 'tc_items',                'JSON');
+    await ac('quotations', 'note_items',              'JSON');
     await ac('quotations', 'pay_stages',              'JSON');
     await ac('quotations', 'updated_at',              'TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP');
     await ac('quotations', 'project_status',           "VARCHAR(20) DEFAULT 'Unbooked'");
@@ -597,6 +599,7 @@ async function initDB() {
     try { await conn.execute("ALTER TABLE quotations ADD COLUMN project_end_date DATE"); } catch {}
     try { await conn.execute("ALTER TABLE quotations ADD COLUMN customer_alt_phone VARCHAR(20)"); } catch {}
     try { await conn.execute("ALTER TABLE quotations ADD COLUMN customer_designation VARCHAR(255)"); } catch {}
+    try { await conn.execute("ALTER TABLE quotations ADD COLUMN note_items JSON"); console.log('[Migration] note_items added'); } catch(e) { if (!e.message.includes('Duplicate')) console.log('[Migration] note_items exists'); }
 
     // Recalculate total_sft for existing quotations that have rooms but sft=0
     try {
@@ -693,9 +696,9 @@ app.post('/api/quotations', requireManagerOrAdmin, writeLimiter, async (req, res
         rooms,accessories,ceiling_data,
         discount_percent,discount_amount,
         gst_percent,gst_amount,total_interior,total_ceiling,grand_total,
-        tc_items,pay_stages,project_status,
+        tc_items,note_items,pay_stages,project_status,
         project_start_date,project_end_date,total_sft)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [
         b.customer_name,
         b.customer_phone || b.mobile || '',
@@ -721,7 +724,7 @@ app.post('/api/quotations', requireManagerOrAdmin, writeLimiter, async (req, res
         Number(b.total_interior) || 0,
         Number(b.total_ceiling)  || 0,
         Number(b.grand_total)    || 0,
-        ss(b.tc_items), ss(b.pay_stages),
+        ss(b.tc_items), ss(b.note_items), ss(b.pay_stages),
         ['Booked','Unbooked'].includes(b.project_status) ? b.project_status : 'Unbooked',
         projectStartDate,
         projectEndDate,
@@ -792,6 +795,7 @@ app.get('/api/quotations/:id', requireManagerOrAdmin, async (req, res) => {
     q.accessories  = sp(q.accessories);
     q.ceiling_data = sp(q.ceiling_data);
     q.tc_items     = sp(q.tc_items);
+    q.note_items   = sp(q.note_items);
     q.floor_plan   = sp(q.floor_plan);
     q.plan_2d      = sp(q.plan_2d);
     q.plan_3d      = sp(q.plan_3d);
@@ -836,7 +840,7 @@ app.put('/api/quotations/:id', requireManagerOrAdmin, writeLimiter, async (req, 
         rooms=?,accessories=?,ceiling_data=?,
         discount_percent=?,discount_amount=?,
         gst_percent=?,gst_amount=?,total_interior=?,total_ceiling=?,grand_total=?,
-        tc_items=?,pay_stages=?,project_status=?,
+        tc_items=?,note_items=?,pay_stages=?,project_status=?,
         project_start_date=?,project_end_date=?,total_sft=?
        WHERE id=?`,
       [
@@ -864,7 +868,7 @@ app.put('/api/quotations/:id', requireManagerOrAdmin, writeLimiter, async (req, 
         Number(b.total_interior) || 0,
         Number(b.total_ceiling)  || 0,
         Number(b.grand_total)    || 0,
-        ss(b.tc_items), ss(b.pay_stages),
+        ss(b.tc_items), ss(b.note_items), ss(b.pay_stages),
         ['Booked','Unbooked'].includes(b.project_status) ? b.project_status : 'Unbooked',
         projectStartDate,
         projectEndDate,
