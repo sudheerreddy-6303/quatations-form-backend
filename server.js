@@ -1295,6 +1295,23 @@ app.use((err, req, res, next) => {
 
 app.get('/', (req, res) => res.json({ status: 'ok', service: 'Deeraj Interiors API' }));
 
+// Public logo proxy — your server fetches the logo and re-serves it, so the PDF
+// renderer and print window can load it (the image CDN blocks them directly).
+app.get('/api/logo.png', async (req, res) => {
+  const LOGO_SRC = 'https://img1.wsimg.com/isteam/ip/e7e3142b-3f26-4173-bc29-b2315178edb8/DI%20logo%20(2).png/:/rs=w:559,h:192,cg:true,m/cr=w:559,h:192/qt=q:95';
+  try {
+    const r = await fetch(LOGO_SRC);
+    if (!r.ok) return res.status(502).send('logo fetch failed');
+    const buf = Buffer.from(await r.arrayBuffer());
+    res.set('Content-Type', r.headers.get('content-type') || 'image/png');
+    res.set('Access-Control-Allow-Origin', '*');
+    res.set('Cache-Control', 'public, max-age=86400');
+    res.send(buf);
+  } catch (e) {
+    res.status(502).send('logo unavailable');
+  }
+});
+
 // ════════════════════════════════════════════════════════════════
 //  START
 // ════════════════════════════════════════════════════════════════
