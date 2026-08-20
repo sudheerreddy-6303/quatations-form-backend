@@ -397,6 +397,8 @@ async function initDB() {
     await ac('quotations', 'pay_stages',              'JSON');
     await ac('quotations', 'updated_at',              'TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP');
     await ac('quotations', 'project_status',           "VARCHAR(20) DEFAULT 'Unbooked'");
+    await ac('quotations', 'lead_status',              "VARCHAR(10) DEFAULT ''");
+    await ac('quotations', 'followup_remarks',         'TEXT');
     // material_orders migrations — new fields
     await ac('material_orders', 'payment_mode',  "VARCHAR(50) DEFAULT 'Cash'");
     await ac('material_orders', 'build_by',      "VARCHAR(100) DEFAULT ''");
@@ -749,10 +751,19 @@ app.post('/api/quotations', requireManagerOrAdmin, writeLimiter, async (req, res
 /* GET — list */
 app.get('/api/quotations', requireManagerOrAdmin, async (req, res) => {
   try {
-    // Step 1: fetch all quotation rows — no ORDER BY to avoid sort buffer limits
-    const [rows] = await pool.execute(
-      `SELECT * FROM quotations`
-    );
+    // Step 1: fetch quotation rows — no ORDER BY to avoid sort buffer limits.
+    // Managers only see THEIR OWN projects (site_manager_name = their display name).
+    // Admins (and API-key access) see everything.
+    let rows;
+    if (req.user && req.user.role === 'manager') {
+      const me = (req.user.display || '').trim();
+      [rows] = await pool.execute(
+        `SELECT * FROM quotations WHERE LOWER(TRIM(site_manager_name)) = LOWER(TRIM(?))`,
+        [me]
+      );
+    } else {
+      [rows] = await pool.execute(`SELECT * FROM quotations`);
+    }
 
     // Step 2: fetch paid totals in one query
     const [paid] = await pool.execute(
@@ -789,6 +800,14 @@ app.get('/api/quotations/:id', requireManagerOrAdmin, async (req, res) => {
   try {
     const [rows] = await conn.execute('SELECT * FROM quotations WHERE id=?', [req.params.id]);
     if (!rows.length) return res.status(404).json({ success: false, message: 'Quotation not found.' });
+
+    // Managers may only open their OWN projects (site_manager_name = their display name).
+    if (req.user && req.user.role === 'manager') {
+      const owner = (rows[0].site_manager_name || '').trim().toLowerCase();
+      const me    = (req.user.display || '').trim().toLowerCase();
+      if (owner !== me)
+        return res.status(403).json({ success: false, message: 'You can only view your own projects.' });
+    }
 
     const q = rows[0];
     q.rooms        = sp(q.rooms);
@@ -1037,10 +1056,17 @@ app.patch('/api/quotations/:id/status', requireManagerOrAdmin, async (req, res) 
 
   const { project_status, role } = req.body;
 
-  if (!['Booked', 'Unbooked'].includes(project_status))
+  if (!['Booked', 'Unbooked', 'Completed'].includes(project_status))
     return res.status(422).json({
       success: false,
-      message: 'project_status must be Booked or Unbooked'
+      message: 'project_status must be Booked, Unbooked or Completed'
+    });
+
+  // Only admins may mark a project Completed
+  if (project_status === 'Completed' && role !== 'admin')
+    return res.status(403).json({
+      success: false,
+      message: 'Only admins can mark a project Completed.'
     });
 
   try {
@@ -1097,8 +1123,8 @@ app.put('/api/quotations/:id/status-only', requireManagerOrAdmin, async (req, re
     return res.status(400).json({ success: false, message: 'Invalid quotation ID.' });
 
   const status = sanitize(req.body.project_status || '');
-  if (!['Booked','Unbooked'].includes(status))
-    return res.status(422).json({ success: false, message: 'project_status must be Booked or Unbooked' });
+  if (!['Booked','Unbooked','Completed'].includes(status))
+    return res.status(422).json({ success: false, message: 'project_status must be Booked, Unbooked or Completed' });
 
   try {
     const [r] = await pool.execute(
@@ -1110,6 +1136,49 @@ app.put('/api/quotations/:id/status-only', requireManagerOrAdmin, async (req, re
     res.json({ success: true, message: `Status updated to ${status}` });
   } catch (err) {
     console.error('PUT /status-only:', err.message);
+    res.status(500).json({ success: false, message: 'Server error.' });
+  }
+});
+
+/* PATCH — lead status & follow-up remarks (for Unbooked leads) */
+app.patch('/api/quotations/:id/lead', requireManagerOrAdmin, async (req, res) => {
+  if (!isPositiveInt(req.params.id))
+    return res.status(400).json({ success: false, message: 'Invalid quotation ID.' });
+
+  const fields = [];
+  const vals   = [];
+
+  if (req.body.lead_status !== undefined) {
+    const ls = String(req.body.lead_status || '');
+    if (!['', 'Hot', 'Cold', 'Dead'].includes(ls))
+      return res.status(422).json({ success: false, message: 'lead_status must be Hot, Cold, Dead or empty.' });
+    fields.push('lead_status=?'); vals.push(ls);
+  }
+  if (req.body.followup_remarks !== undefined) {
+    fields.push('followup_remarks=?'); vals.push(String(req.body.followup_remarks || ''));
+  }
+  if (!fields.length)
+    return res.status(400).json({ success: false, message: 'Nothing to update.' });
+
+  vals.push(req.params.id);
+  try {
+    // Make sure the lead columns exist (safe no-op if they already do).
+    // This guards against an older DB where the migration hadn't added them yet.
+    try { await pool.execute("ALTER TABLE quotations ADD COLUMN lead_status VARCHAR(10) DEFAULT ''"); } catch (_) {}
+    try { await pool.execute("ALTER TABLE quotations ADD COLUMN followup_remarks TEXT"); } catch (_) {}
+
+    // Confirm the quotation actually exists first.
+    const [exists] = await pool.execute('SELECT id FROM quotations WHERE id=?', [req.params.id]);
+    if (!exists.length)
+      return res.status(404).json({ success: false, message: 'Quotation not found.' });
+
+    // Run the update. Note: MySQL reports affectedRows=0 when the new value
+    // is identical to the current one — that is NOT an error, so we don't
+    // treat it as "not found" here (the existence check above already ran).
+    await pool.execute(`UPDATE quotations SET ${fields.join(', ')} WHERE id=?`, vals);
+    res.json({ success: true, message: 'Follow-up saved.' });
+  } catch (err) {
+    console.error('PATCH /lead:', err.message);
     res.status(500).json({ success: false, message: 'Server error.' });
   }
 });
