@@ -533,6 +533,32 @@ async function initDB() {
       ")"
     );
 
+
+    // ── QUOTATION VERSIONS (admin-only history) ──
+    // Full copy of a quotation saved before every approved edit / admin edit of a Booked project.
+    await conn.execute(
+      "CREATE TABLE IF NOT EXISTS quotation_versions (" +
+      "  id INT AUTO_INCREMENT PRIMARY KEY," +
+      "  quotation_id INT NOT NULL," +
+      "  version_no INT NOT NULL," +
+      "  snapshot LONGTEXT," +
+      "  grand_total DECIMAL(14,2) DEFAULT 0," +
+      "  saved_reason VARCHAR(50) DEFAULT ''," +
+      "  edit_request_id INT NULL," +
+      "  requested_by VARCHAR(255) DEFAULT ''," +
+      "  request_reason TEXT," +
+      "  approved_by VARCHAR(255) DEFAULT ''," +
+      "  edited_by VARCHAR(255) DEFAULT ''," +
+      "  edited_at DATETIME NULL," +
+      "  grand_total_after DECIMAL(14,2) NULL," +
+      "  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP," +
+      "  INDEX idx_qv_quotation (quotation_id)," +
+      "  FOREIGN KEY (quotation_id) REFERENCES quotations(id) ON DELETE CASCADE" +
+      ")"
+    );
+    // edit_requests.used_at — set when the manager saves the approved edit (permission closes)
+    try { await conn.execute("ALTER TABLE edit_requests ADD COLUMN used_at DATETIME NULL"); } catch {}
+
     // payment_delete_requests table — migrate txn_snapshot column type if needed
     try { await conn.execute("ALTER TABLE payment_delete_requests MODIFY COLUMN txn_snapshot MEDIUMTEXT"); } catch {}
     await conn.execute(
@@ -668,6 +694,72 @@ async function fetchPaymentStages(conn, quotationId) {
     paymentDetails: r.payment_details  || '',
     receivedBy:     r.received_by      || '',
   }));
+}
+
+// ── STAGE-WISE PAYMENT: keep scheduled stage amounts in line with the CURRENT grand total ──
+// Same rule as the Payment Schedule window: each stage = its fixed % of the grand total,
+// the last named stage takes the rounding remainder. Only applied when the saved stage
+// amounts no longer add up to the grand total (e.g. total changed after the schedule was saved).
+// Paid amounts / dates / modes are never changed.
+const STAGE_PERCENTAGES = {
+  'Booking Advance':         10,
+  'After Design':            25,
+  'Material Purchase time':  25,
+  'Carcas Installation':     15,
+  'Doors Fitting':           10,
+  'Handles Fitting':          5,
+  'Finishing and Hand Over': 10,
+};
+function rebalanceStagesToTotal(stages, grandTotal) {
+  const gt = parseFloat(grandTotal) || 0;
+  if (!Array.isArray(stages) || !stages.length || gt <= 0) return stages;
+  if (!stages.every(r => r && typeof r === 'object')) return stages;
+  const named = stages.map((r, i) => ((r.stage && String(r.stage).trim()) ? i : -1)).filter(i => i >= 0);
+  if (!named.length) return stages;
+  if (!named.some(i => STAGE_PERCENTAGES[String(stages[i].stage).trim()] !== undefined)) return stages; // custom schedule — leave it
+  const sum = stages.reduce((t, r) => t + (parseFloat(r.paymentAmount) || 0), 0);
+  if (Math.abs(sum - gt) <= 1) return stages; // already matches the grand total
+  const round2 = (n) => Math.round(n * 100) / 100;
+  const amtFor = (nm) => round2(gt * (Number(STAGE_PERCENTAGES[String(nm).trim()] || 0)) / 100);
+  const last = named[named.length - 1];
+  let next = stages.map((r, i) => (named.includes(i) && i !== last) ? { ...r, paymentAmount: String(amtFor(r.stage)) } : r);
+  const others = next.reduce((t, r, i) => (i === last ? t : t + (parseFloat(r.paymentAmount) || 0)), 0);
+  next = next.map((r, i) => (i === last ? { ...r, paymentAmount: String(round2(Math.max(0, gt - others))) } : r));
+  return next;
+}
+
+// ── QUOTATION VERSIONS helper ──
+// Saves the CURRENT state of a quotation as the next version number.
+// Returns the saved version_no.
+async function saveQuotationVersion(conn, quotationId, meta = {}) {
+  const [rows] = await conn.execute('SELECT * FROM quotations WHERE id=?', [quotationId]);
+  if (!rows.length) return null;
+  const q = rows[0];
+  ['rooms','accessories','ceiling_data','tc_items','note_items','floor_plan','plan_2d','plan_3d'].forEach(k => { q[k] = sp(q[k]); });
+  try {
+    const stages = await fetchPaymentStages(conn, quotationId);
+    q.pay_stages = stages.length > 0 ? stages : sp(q.pay_stages);
+  } catch { q.pay_stages = sp(q.pay_stages); }
+  q.pay_stages = rebalanceStagesToTotal(q.pay_stages, q.grand_total);
+  // If nothing changed since the last saved copy and it hasn't been edited yet, reuse it (no duplicate versions)
+  if (meta.reuse_if_unchanged) {
+    const [[last]] = await conn.execute(
+      'SELECT version_no, snapshot, edited_at FROM quotation_versions WHERE quotation_id=? ORDER BY version_no DESC LIMIT 1',
+      [quotationId]
+    );
+    if (last && !last.edited_at && last.snapshot === JSON.stringify(q)) return last.version_no;
+  }
+  const [[mx]] = await conn.execute('SELECT COALESCE(MAX(version_no),0) AS m FROM quotation_versions WHERE quotation_id=?', [quotationId]);
+  const versionNo = Number(mx.m) + 1;
+  await conn.execute(
+    `INSERT INTO quotation_versions
+      (quotation_id, version_no, snapshot, grand_total, saved_reason, edit_request_id, requested_by, request_reason, approved_by)
+     VALUES (?,?,?,?,?,?,?,?,?)`,
+    [quotationId, versionNo, JSON.stringify(q), Number(q.grand_total) || 0,
+     meta.saved_reason || '', meta.edit_request_id || null, meta.requested_by || '',
+     meta.request_reason || '', meta.approved_by || '']
+  );
+  return versionNo;
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -821,6 +913,7 @@ app.get('/api/quotations/:id', requireManagerOrAdmin, async (req, res) => {
 
     const stages = await fetchPaymentStages(conn, q.id);
     q.pay_stages = stages.length > 0 ? stages : sp(q.pay_stages);
+    q.pay_stages = rebalanceStagesToTotal(q.pay_stages, q.grand_total); // stage amounts follow the current grand total
 
     res.json({ success: true, data: q });
   } catch (err) {
@@ -849,6 +942,21 @@ app.put('/api/quotations/:id', requireManagerOrAdmin, writeLimiter, async (req, 
     if (!exists.length) return res.status(404).json({ success: false, message: 'Quotation not found.' });
 
     await conn.beginTransaction();
+
+    // ── QUOTATION VERSIONS: admin editing a Booked project directly → save current copy first ──
+    let _versionAdminSaved = false;
+    if (req.user && req.user.role === 'admin') {
+      try {
+        const [[cur]] = await conn.execute('SELECT project_status FROM quotations WHERE id=?', [req.params.id]);
+        if (cur && cur.project_status === 'Booked') {
+          await saveQuotationVersion(conn, req.params.id, {
+            saved_reason: 'admin_edit', approved_by: req.user.display || req.user.username || 'Admin',
+            requested_by: req.user.display || req.user.username || 'Admin', request_reason: 'Admin edit',
+          });
+          _versionAdminSaved = true;
+        }
+      } catch (e) { console.error('saveQuotationVersion (admin edit):', e.message); }
+    }
 
     await conn.execute(
       `UPDATE quotations SET
@@ -900,6 +1008,36 @@ app.put('/api/quotations/:id', requireManagerOrAdmin, writeLimiter, async (req, 
       await savePaymentStages(conn, req.params.id, b.pay_stages);
 
     await conn.commit();
+
+    // ── QUOTATION VERSIONS: record who edited + new total on the latest version,
+    //    and close the manager's approved edit permission (one edit per approval) ──
+    try {
+      const editor = (req.user && (req.user.display || req.user.username)) || '';
+      if (req.user && req.user.role === 'manager') {
+        const [open] = await conn.execute(
+          "SELECT id FROM edit_requests WHERE quotation_id=? AND manager_user=? AND status='Approved' AND used_at IS NULL",
+          [req.params.id, req.user.username]
+        );
+        if (open.length) {
+          await conn.execute(
+            "UPDATE edit_requests SET used_at=NOW() WHERE quotation_id=? AND manager_user=? AND status='Approved' AND used_at IS NULL",
+            [req.params.id, req.user.username]
+          );
+          await conn.execute(
+            `UPDATE quotation_versions SET edited_by=?, edited_at=NOW(), grand_total_after=?
+             WHERE quotation_id=? AND edited_at IS NULL ORDER BY version_no DESC LIMIT 1`,
+            [editor, Number(b.grand_total) || 0, req.params.id]
+          );
+        }
+      } else if (_versionAdminSaved) {
+        await conn.execute(
+          `UPDATE quotation_versions SET edited_by=?, edited_at=NOW(), grand_total_after=?
+           WHERE quotation_id=? AND edited_at IS NULL ORDER BY version_no DESC LIMIT 1`,
+          [editor, Number(b.grand_total) || 0, req.params.id]
+        );
+      }
+    } catch (e) { console.error('quotation_versions (after edit):', e.message); }
+
     res.json({ success: true, message: 'Quotation updated.' });
   } catch (err) {
     try { await conn.rollback(); } catch (_) {}
@@ -1919,9 +2057,91 @@ app.patch('/api/edit-requests/:id', requireAdmin, async (req, res) => {
       [status, admin_note || '', req.params.id]
     );
     if (!r.affectedRows) return res.status(404).json({ success: false, message: 'Request not found.' });
-    res.json({ success: true, message: `Request ${status}.` });
+
+    // ── QUOTATION VERSIONS: on approve, save the current quotation as a version (once per request) ──
+    let version_no = null;
+    if (status === 'Approved') {
+      try {
+        const [[er]] = await pool.execute('SELECT * FROM edit_requests WHERE id=?', [req.params.id]);
+        if (er) {
+          const [[already]] = await pool.execute('SELECT version_no FROM quotation_versions WHERE edit_request_id=?', [er.id]);
+          if (already) {
+            version_no = already.version_no;
+          } else {
+            const conn = await pool.getConnection();
+            try {
+              version_no = await saveQuotationVersion(conn, er.quotation_id, {
+                saved_reason: 'edit_approved', edit_request_id: er.id,
+                reuse_if_unchanged: true,
+                requested_by: er.manager_name || er.manager_user, request_reason: er.reason || '',
+                approved_by: (req.user && (req.user.display || req.user.username)) || 'Admin',
+              });
+            } finally { try { conn.release(); } catch (_) {} }
+          }
+        }
+      } catch (e) { console.error('saveQuotationVersion (approve):', e.message); }
+    }
+
+    res.json({ success: true, message: `Request ${status}.`, version_no });
   } catch (err) {
     console.error('PATCH /edit-requests/:id:', err.message);
+    res.status(500).json({ success: false, message: 'Server error.' });
+  }
+});
+
+// ════════════════════════════════════════════════════════════════
+//  QUOTATION VERSIONS
+// ════════════════════════════════════════════════════════════════
+
+// GET /api/my-edit-approvals — manager: quotation ids they currently have approved (unused) edit permission for
+app.get('/api/my-edit-approvals', requireManagerOrAdmin, async (req, res) => {
+  try {
+    const [rows] = await pool.execute(
+      "SELECT DISTINCT quotation_id FROM edit_requests WHERE manager_user=? AND status='Approved' AND used_at IS NULL",
+      [(req.user && req.user.username) || '']
+    );
+    res.json({ success: true, data: rows.map(r => r.quotation_id) });
+  } catch (err) {
+    console.error('GET /my-edit-approvals:', err.message);
+    res.status(500).json({ success: false, message: 'Server error.' });
+  }
+});
+
+// GET /api/quotations/:id/versions — ADMIN ONLY: list of saved versions (without the full copy)
+app.get('/api/quotations/:id/versions', requireAdmin, async (req, res) => {
+  if (!isPositiveInt(req.params.id))
+    return res.status(400).json({ success: false, message: 'Invalid quotation ID.' });
+  try {
+    const [rows] = await pool.execute(
+      `SELECT id, quotation_id, version_no, grand_total, saved_reason, edit_request_id, requested_by,
+              request_reason, approved_by, edited_by, edited_at, grand_total_after, created_at
+       FROM quotation_versions WHERE quotation_id=? ORDER BY version_no DESC`,
+      [req.params.id]
+    );
+    const current_version = rows.length ? Number(rows[0].version_no) + 1 : 1;
+    res.json({ success: true, data: rows, current_version });
+  } catch (err) {
+    console.error('GET /quotations/:id/versions:', err.message);
+    res.status(500).json({ success: false, message: 'Server error.' });
+  }
+});
+
+// GET /api/quotations/:id/versions/:versionId — ADMIN ONLY: full saved copy of one version
+app.get('/api/quotations/:id/versions/:versionId', requireAdmin, async (req, res) => {
+  if (!isPositiveInt(req.params.id) || !isPositiveInt(req.params.versionId))
+    return res.status(400).json({ success: false, message: 'Invalid ID.' });
+  try {
+    const [[row]] = await pool.execute(
+      'SELECT * FROM quotation_versions WHERE id=? AND quotation_id=?',
+      [req.params.versionId, req.params.id]
+    );
+    if (!row) return res.status(404).json({ success: false, message: 'Version not found.' });
+    let snap = {};
+    try { snap = JSON.parse(row.snapshot || '{}'); } catch { snap = {}; }
+    delete row.snapshot;
+    res.json({ success: true, data: { ...row, quotation: snap } });
+  } catch (err) {
+    console.error('GET /quotations/:id/versions/:versionId:', err.message);
     res.status(500).json({ success: false, message: 'Server error.' });
   }
 });
