@@ -1502,6 +1502,49 @@ app.use((err, req, res, next) => {
 
 app.get('/', (req, res) => res.json({ status: 'ok', service: 'Deeraj Interiors API' }));
 
+// ── LOGO (more reliable): runs BEFORE the original /api/logo.png route below.
+//    1) If a logo file is placed in the backend folder (logo.png), serve that — no outside dependency.
+//    2) Otherwise serve the last logo that was fetched successfully (kept in memory).
+//    3) Otherwise fetch from the website image server with normal browser headers
+//       (some image servers refuse requests without them).
+//    If all of that fails it hands over to the original route unchanged (next()).
+let _logoCache = null; // { buf, type }
+app.get('/api/logo.png', async (req, res, next) => {
+  // helmet sets "Cross-Origin-Resource-Policy: same-origin" by default, which makes browsers
+  // block this image on the frontend's (different) domain — allow it for the logo only.
+  res.set('Cross-Origin-Resource-Policy', 'cross-origin');
+  const send = (buf, type) => {
+    res.set('Content-Type', type || 'image/png');
+    res.set('Access-Control-Allow-Origin', '*');
+    res.set('Cache-Control', 'public, max-age=86400');
+    return res.send(buf);
+  };
+  try {
+    const fs = require('fs'), path = require('path');
+    for (const name of ['logo.png', 'logo.jpg', 'logo.jpeg']) {
+      const f = path.join(__dirname, name);
+      if (fs.existsSync(f)) return send(fs.readFileSync(f), name.endsWith('.png') ? 'image/png' : 'image/jpeg');
+    }
+  } catch (_) {}
+  if (_logoCache) return send(_logoCache.buf, _logoCache.type);
+  try {
+    const LOGO_SRC = 'https://img1.wsimg.com/isteam/ip/e7e3142b-3f26-4173-bc29-b2315178edb8/DI%20logo%20(2).png/:/rs=w:559,h:192,cg:true,m/cr=w:559,h:192/qt=q:95';
+    const r = await fetch(LOGO_SRC, { headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+      'Accept': 'image/avif,image/webp,image/png,image/*,*/*;q=0.8',
+    } });
+    if (r.ok) {
+      const buf = Buffer.from(await r.arrayBuffer());
+      if (buf.length > 100) {
+        _logoCache = { buf, type: r.headers.get('content-type') || 'image/png' };
+        return send(_logoCache.buf, _logoCache.type);
+      }
+    }
+    console.error('logo fetch (browser headers) status:', r.status);
+  } catch (e) { console.error('logo fetch (browser headers) failed:', e.message); }
+  return next(); // fall back to the original logo route below
+});
+
 // Public logo proxy — your server fetches the logo and re-serves it, so the PDF
 // renderer and print window can load it (the image CDN blocks them directly).
 app.get('/api/logo.png', async (req, res) => {
